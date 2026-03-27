@@ -1,5 +1,7 @@
 <?php
 declare(strict_types=1);
+$cssPath = __DIR__ . '/assets/css/style.css';
+$version = file_exists($cssPath) ? filemtime($cssPath) : time();
 
 function render_header(string $title, string $activeNav = '', array $meta = []): void
 {
@@ -29,7 +31,7 @@ function render_header(string $title, string $activeNav = '', array $meta = []):
     $user = current_user();
     $showAdminLink = is_admin();
     $profileActive = in_array($activeNav, ['account', 'submit', 'guidelines'], true);
-    ?>
+?>
 <!doctype html>
 <html lang="en">
 <head>
@@ -56,7 +58,7 @@ function render_header(string $title, string $activeNav = '', array $meta = []):
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
-    <link rel="stylesheet" href="<?= e(base_url('assets/css/style.css')) ?>">
+    <link rel="stylesheet" href="<?= e(base_url('assets/css/style.css')) ?>?v=<?= $version ?>">
 </head>
 <body>
 <header>
