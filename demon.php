@@ -158,15 +158,28 @@ if ($id < 1) {
     redirect('index.php');
 }
 
+$hasUserBannedColumn = users_has_is_banned_column();
+
 $allDemons = db()->query('SELECT id, position, name, creator, publisher, legacy
                            FROM demons
                            ORDER BY position ASC')->fetchAll();
 
-$stmt = db()->prepare('SELECT d.*, COUNT(c.id) AS completion_count
-                       FROM demons d
-                       LEFT JOIN completions c ON c.demon_id = d.id
-                       WHERE d.id = :id
-                       GROUP BY d.id');
+$demonSelectSql = $hasUserBannedColumn
+    ? 'SELECT d.*,
+              COUNT(CASE WHEN banned_users.id IS NULL THEN c.id END) AS completion_count
+       FROM demons d
+       LEFT JOIN completions c ON c.demon_id = d.id
+       LEFT JOIN users banned_users
+         ON LOWER(banned_users.username) = LOWER(c.player)
+        AND COALESCE(banned_users.is_banned, 0) = 1
+       WHERE d.id = :id
+       GROUP BY d.id'
+    : 'SELECT d.*, COUNT(c.id) AS completion_count
+       FROM demons d
+       LEFT JOIN completions c ON c.demon_id = d.id
+       WHERE d.id = :id
+       GROUP BY d.id';
+$stmt = db()->prepare($demonSelectSql);
 $stmt->execute([':id' => $id]);
 $demon = $stmt->fetch();
 
@@ -219,11 +232,19 @@ for ($i = 0, $count = count($allDemons); $i < $count; $i++) {
     }
 }
 
-$completionsStmt = db()->prepare('SELECT c.*, u.country_code
-                                  FROM completions c
-                                  LEFT JOIN users u ON LOWER(u.username) = LOWER(c.player)
-                                  WHERE c.demon_id = :id
-                                  ORDER BY c.progress DESC, COALESCE(c.placement, 999999), c.created_at ASC');
+$completionsSql = $hasUserBannedColumn
+    ? 'SELECT c.*, u.country_code
+       FROM completions c
+       LEFT JOIN users u ON LOWER(u.username) = LOWER(c.player)
+       WHERE c.demon_id = :id
+         AND (u.id IS NULL OR COALESCE(u.is_banned, 0) = 0)
+       ORDER BY c.progress DESC, COALESCE(c.placement, 999999), c.created_at ASC'
+    : 'SELECT c.*, u.country_code
+       FROM completions c
+       LEFT JOIN users u ON LOWER(u.username) = LOWER(c.player)
+       WHERE c.demon_id = :id
+       ORDER BY c.progress DESC, COALESCE(c.placement, 999999), c.created_at ASC';
+$completionsStmt = db()->prepare($completionsSql);
 $completionsStmt->execute([':id' => $id]);
 $completions = $completionsStmt->fetchAll();
 
@@ -235,11 +256,16 @@ $historyStmt = db()->prepare('SELECT created_at, old_position, new_position, not
 $historyStmt->execute([':demon_id' => $id]);
 $positionHistory = $historyStmt->fetchAll();
 
-$listEditors = db()->query('SELECT username, country_code
-                            FROM users
-                            WHERE role = "admin"
-                            ORDER BY created_at ASC, username ASC
-                            LIMIT 20')->fetchAll();
+$listEditorsSql = 'SELECT username, country_code
+                   FROM users
+                   WHERE role = "admin"';
+if ($hasUserBannedColumn) {
+    $listEditorsSql .= ' AND COALESCE(is_banned, 0) = 0';
+}
+$listEditorsSql .= '
+                   ORDER BY created_at ASC, username ASC
+                   LIMIT 20';
+$listEditors = db()->query($listEditorsSql)->fetchAll();
 
 $discordWidgetUrl = discord_server_widget_url();
 
@@ -496,4 +522,3 @@ render_header((string) $demon['name'], 'list', [
 </div>
 
 <?php render_footer(); ?>
-

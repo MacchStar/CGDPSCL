@@ -1,11 +1,42 @@
 <?php
 declare(strict_types=1);
-$cssPath = __DIR__ . '/assets/css/style.css';
-$version = file_exists($cssPath) ? filemtime($cssPath) : time();
+
 
 function render_header(string $title, string $activeNav = '', array $meta = []): void
 {
     $appName = app_name();
+    $brandMode = (int) config('app.brand_mode', 1);
+    $logoPathRaw = trim((string) config('app.logo_path', 'logo.png'));
+    $brandLogoUrl = null;
+    $brandLogoStyle = '';
+    if ($brandMode === 2 && $logoPathRaw !== '') {
+        $logoRelativePath = ltrim(str_replace('\\', '/', $logoPathRaw), '/');
+        $logoFsPath = dirname(__DIR__) . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $logoRelativePath);
+        if ($logoRelativePath !== '' && is_file($logoFsPath)) {
+            $brandLogoUrl = base_url($logoRelativePath);
+            $logoHeight = (int) config('app.logo_height', 34);
+            if ($logoHeight < 18) {
+                $logoHeight = 18;
+            } elseif ($logoHeight > 52) {
+                $logoHeight = 52;
+            }
+
+            $logoMaxWidth = (int) config('app.logo_max_width', 220);
+            if ($logoMaxWidth < 100) {
+                $logoMaxWidth = 100;
+            } elseif ($logoMaxWidth > 520) {
+                $logoMaxWidth = 520;
+            }
+
+            $brandLogoStyle = sprintf(
+                'height:%dpx;max-height:%dpx;width:auto;max-width:min(48vw,%dpx);object-fit:contain;display:block;',
+                $logoHeight,
+                $logoHeight,
+                $logoMaxWidth
+            );
+        }
+    }
+
     $pageTitle = trim((string) ($meta['title'] ?? $title));
     if ($pageTitle === '') {
         $pageTitle = $title !== '' ? $title : $appName;
@@ -58,14 +89,18 @@ function render_header(string $title, string $activeNav = '', array $meta = []):
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
-    <link rel="stylesheet" href="<?= e(base_url('assets/css/style.css')) ?>?v=<?= $version ?>">
+    <link rel="stylesheet" href="<?= e(base_url('assets/css/style.css')) ?>">
 </head>
 <body>
 <header>
     <nav class="center collapse underlined see-through">
-        <div class="nav-icon nav-nohide" style="margin-right: auto; font-size: 1.1em; letter-spacing: 0.05em;">
-            <a href="<?= e(base_url('index.php')) ?>" style="font-weight: 700; color: inherit;">
-                <?= e($appName) ?>
+        <div class="nav-icon nav-nohide nav-brand-wrap" style="margin-right: auto; font-size: 1.1em; letter-spacing: 0.05em;">
+            <a href="<?= e(base_url('index.php')) ?>" class="nav-brand-link" style="font-weight: 700; color: inherit;">
+                <?php if ($brandLogoUrl !== null): ?>
+                    <img src="<?= e($brandLogoUrl) ?>" alt="<?= e($appName) ?>" class="nav-brand-logo" style="<?= e($brandLogoStyle) ?>">
+                <?php else: ?>
+                    <?= e($appName) ?>
+                <?php endif; ?>
             </a>
         </div>
 

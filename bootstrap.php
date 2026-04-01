@@ -6,6 +6,7 @@ if (!is_file($configPath)) {
     $configPath = __DIR__ . '/config.example.php';
 }
 
+$GLOBALS['app_config_path'] = $configPath;
 $GLOBALS['app_config'] = require $configPath;
 $timezone = (string) ($GLOBALS['app_config']['app']['timezone'] ?? 'UTC');
 date_default_timezone_set($timezone);
@@ -16,4 +17,8 @@ if (session_status() !== PHP_SESSION_ACTIVE) {
 
 require_once __DIR__ . '/includes/functions.php';
 require_once __DIR__ . '/includes/db.php';
+require_once __DIR__ . '/includes/schema_update.php';
+
+ensure_schema_updated_on_bootstrap();
+
 require_once __DIR__ . '/includes/layout.php';

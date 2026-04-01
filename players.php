@@ -91,9 +91,34 @@ function demon_list_bucket(int $position, bool $legacy): string
     return 'extended';
 }
 
-$users = db()->query('SELECT id, username, country_code, role, points
-                       FROM users
-                       ORDER BY username ASC')->fetchAll();
+$pdo = db();
+
+$hasBonusPointsColumn = false;
+try {
+    $hasBonusPointsColumn = (bool) $pdo->query(
+        "SELECT COUNT(*)
+         FROM information_schema.columns
+         WHERE table_schema = DATABASE()
+           AND table_name = 'users'
+           AND column_name = 'bonus_points'"
+    )->fetchColumn();
+} catch (Throwable) {
+    $hasBonusPointsColumn = false;
+}
+
+$hasUserBannedColumn = users_has_is_banned_column($pdo);
+$userSelectFields = [
+    'id',
+    'username',
+    'country_code',
+    'role',
+    'points',
+    $hasBonusPointsColumn ? 'bonus_points' : '0.00 AS bonus_points',
+    $hasUserBannedColumn ? 'is_banned' : '0 AS is_banned',
+];
+$userSelect = 'SELECT ' . implode(', ', $userSelectFields) . ' FROM users ORDER BY username ASC';
+
+$users = $pdo->query($userSelect)->fetchAll();
 
 $demons = db()->query('SELECT id, name, position, requirement, legacy, creator, publisher, verifier
                        FROM demons
@@ -126,12 +151,15 @@ $ensurePlayer = static function (string $rawName) use (&$playersByKey): ?string 
             'username' => $name,
             'country_code' => null,
             'role' => 'player',
+            'is_banned' => false,
             'stored_points' => 0.0,
+            'bonus_points' => 0.0,
             'points' => 0.0,
             'score' => 0.0,
             'rank' => null,
             'total_records' => 0,
             'total_completions' => 0,
+            'completion_scores' => [],
             'main_records' => 0,
             'extended_records' => 0,
             'legacy_records' => 0,
@@ -164,7 +192,9 @@ foreach ($users as $user) {
     $playersByKey[$key]['username'] = $username;
     $playersByKey[$key]['country_code'] = normalize_country_code((string) ($user['country_code'] ?? ''));
     $playersByKey[$key]['role'] = (string) ($user['role'] ?? 'player');
+    $playersByKey[$key]['is_banned'] = (int) ($user['is_banned'] ?? 0) === 1;
     $playersByKey[$key]['stored_points'] = round((float) ($user['points'] ?? 0.0), 2);
+    $playersByKey[$key]['bonus_points'] = round((float) ($user['bonus_points'] ?? 0.0), 2);
     $playersByKey[$key]['points'] = (float) $playersByKey[$key]['stored_points'];
 }
 
@@ -236,6 +266,10 @@ foreach ($records as $record) {
     $playersByKey[$key]['total_records']++;
     if (!$legacy) {
         $playersByKey[$key]['score'] += $score;
+        $existingScore = (float) ($playersByKey[$key]['completion_scores'][$demonId] ?? 0.0);
+        if ($score > $existingScore) {
+            $playersByKey[$key]['completion_scores'][$demonId] = $score;
+        }
     }
 
     $listBucket = demon_list_bucket($position, $legacy);
@@ -319,7 +353,32 @@ foreach ($players as &$player) {
     $player['demons_verified'] = $sortByDemonPosition((array) $player['demons_verified']);
     $player['progress_on'] = $sortByDemonPosition((array) $player['progress_on']);
 
-    $computedPoints = round((float) $player['score'], 2);
+    $verifierBonus = 0.0;
+    foreach ((array) $player['demons_verified'] as $verifiedDemon) {
+        $verifiedDemonId = isset($verifiedDemon['id']) ? (int) $verifiedDemon['id'] : 0;
+        if ($verifiedDemonId < 1 || !isset($demonById[$verifiedDemonId])) {
+            continue;
+        }
+
+        $verifiedInfo = $demonById[$verifiedDemonId];
+        $verifiedLegacy = (int) ($verifiedInfo['legacy'] ?? 0) === 1;
+        $verifiedPosition = (int) ($verifiedInfo['position'] ?? 0);
+        $verifiedRequirement = (int) ($verifiedInfo['requirement'] ?? 100);
+
+        if ($verifiedLegacy || $verifiedPosition < 1 || $verifiedPosition > 150) {
+            continue;
+        }
+
+        $fullVerifierScore = pointercrate_score($verifiedPosition, $verifiedRequirement, 100);
+        $existingCompletionScore = (float) ($player['completion_scores'][$verifiedDemonId] ?? 0.0);
+
+        // Award verifier full points for the level, without double-counting if they already completed it.
+        if ($fullVerifierScore > $existingCompletionScore) {
+            $verifierBonus += ($fullVerifierScore - $existingCompletionScore);
+        }
+    }
+
+    $computedPoints = round((float) $player['score'] + $verifierBonus + (float) ($player['bonus_points'] ?? 0.0), 2);
     $player['points'] = $computedPoints;
 
     if ((bool) ($player['has_account'] ?? false) && $player['user_id'] !== null) {
@@ -349,6 +408,12 @@ if ($userPointUpdates !== []) {
 }
 
 usort($players, static function (array $a, array $b): int {
+    $aBanned = !empty($a['is_banned']);
+    $bBanned = !empty($b['is_banned']);
+    if ($aBanned !== $bBanned) {
+        return $aBanned ? 1 : -1;
+    }
+
     $scoreCompare = (float) $b['points'] <=> (float) $a['points'];
     if ($scoreCompare !== 0) {
         return $scoreCompare;
@@ -369,7 +434,8 @@ usort($players, static function (array $a, array $b): int {
 
 $rank = 0;
 foreach ($players as &$player) {
-    if ((float) $player['points'] > 0.00001) {
+    $playerBanned = !empty($player['is_banned']);
+    if (!$playerBanned && (float) $player['points'] > 0.00001) {
         $rank++;
         $player['rank'] = $rank;
     } else {
@@ -486,7 +552,6 @@ foreach ($players as $player) {
         'demons_published' => $serializeDemonItems((array) $player['demons_published']),
         'demons_verified' => $serializeDemonItems((array) $player['demons_verified']),
         'progress_on' => $serializeDemonItems((array) $player['progress_on'], true),
-        'player_url' => base_url('players.php?user=' . rawurlencode((string) $player['username'])),
         'flag_url' => country_flag_asset_url($countryCode),
         'search' => strtolower((string) $player['username']) . ' '
             . (($player['rank'] !== null) ? ('#' . (int) $player['rank']) : '') . ' '
@@ -566,7 +631,7 @@ render_header('Stats Viewer', 'players');
                 <div class="stats-viewer-player-head">
                     <h2 class="stats-viewer-player-title">
                         <span id="stats-player-flag"><?= $selectedFlag ?></span>
-                        <a id="stats-player-link" class="player-link" href="<?= e(base_url('players.php?user=' . rawurlencode((string) $selectedPlayer['username']))) ?>"><?= e((string) $selectedPlayer['username']) ?></a>
+                        <span id="stats-player-name" class="stats-viewer-player-name"><?= e((string) $selectedPlayer['username']) ?></span>
                     </h2>
                 </div>
 
@@ -583,11 +648,11 @@ render_header('Stats Viewer', 'players');
                         <h3>Hardest demon</h3>
                         <p id="stats-hardest"><?= e($selectedHardestLabel) ?></p>
                     </article>
-                    <article class="stats-viewer-summary-card">
+                    <article class="stats-viewer-summary-card stats-viewer-summary-card-contrib">
                         <h3>Contributions</h3>
                         <p id="stats-contrib"><?= count((array) $selectedPlayer['demons_created']) ?> Created, <?= count((array) $selectedPlayer['demons_published']) ?> Published, <?= count((array) $selectedPlayer['demons_verified']) ?> Verified</p>
                     </article>
-                    <article class="stats-viewer-summary-card">
+                    <article class="stats-viewer-summary-card stats-viewer-summary-card-breakdown">
                         <h3>Demonlist stats</h3>
                         <p id="stats-breakdown"><?= (int) $selectedPlayer['main_records'] ?> Main, <?= (int) $selectedPlayer['extended_records'] ?> Extended, <?= (int) $selectedPlayer['legacy_records'] ?> Legacy</p>
                     </article>
@@ -639,9 +704,10 @@ render_header('Stats Viewer', 'players');
             const clearSearch = document.getElementById('stats-player-search-clear');
             const prevButton = document.getElementById('stats-viewer-prev');
             const nextButton = document.getElementById('stats-viewer-next');
+            const detailEl = document.getElementById('stats-viewer-detail');
 
             const flagEl = document.getElementById('stats-player-flag');
-            const nameEl = document.getElementById('stats-player-link');
+            const nameEl = document.getElementById('stats-player-name');
             const rankEl = document.getElementById('stats-rank');
             const scoreEl = document.getElementById('stats-score');
             const breakdownEl = document.getElementById('stats-breakdown');
@@ -773,9 +839,8 @@ render_header('Stats Viewer', 'players');
                 setActiveItem(player.key);
 
                 renderFlag(player.flag_url || '');
-                if (nameEl instanceof HTMLAnchorElement) {
+                if (nameEl instanceof HTMLElement) {
                     nameEl.textContent = player.username;
-                    nameEl.href = player.player_url;
                 }
 
                 if (rankEl instanceof HTMLElement) {
@@ -802,6 +867,12 @@ render_header('Stats Viewer', 'players');
                 renderDemonList(progressEl, player.progress_on, true);
 
                 updateQueryString(player.username);
+
+                if (detailEl instanceof HTMLElement) {
+                    detailEl.classList.remove('is-updating');
+                    void detailEl.offsetWidth;
+                    detailEl.classList.add('is-updating');
+                }
             };
 
             const syncVisibleList = () => {
@@ -907,3 +978,6 @@ render_header('Stats Viewer', 'players');
     <?php endif; ?>
 </section>
 <?php render_footer(); ?>
+
+
+

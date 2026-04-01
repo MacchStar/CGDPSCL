@@ -41,15 +41,33 @@ if (method_is_post()) {
 
     if ($errors === []) {
         try {
-            $insert = db()->prepare('INSERT INTO users (username, display_name, email, password_hash, role)
-                                     VALUES (:username, :display_name, :email, :password_hash, "player")');
+            $pdo = db();
+            $hasDisplayName = (bool) $pdo->query(
+                "SELECT COUNT(*)
+                 FROM information_schema.columns
+                 WHERE table_schema = DATABASE()
+                   AND table_name = 'users'
+                   AND column_name = 'display_name'"
+            )->fetchColumn();
 
-            $insert->execute([
-                ':username' => $form['username'],
-                ':display_name' => $form['username'],
-                ':email' => $form['email'] !== '' ? $form['email'] : null,
-                ':password_hash' => password_hash($password, PASSWORD_DEFAULT),
-            ]);
+            if ($hasDisplayName) {
+                $insert = $pdo->prepare('INSERT INTO users (username, display_name, email, password_hash, role)
+                                         VALUES (:username, :display_name, :email, :password_hash, "player")');
+                $insert->execute([
+                    ':username' => $form['username'],
+                    ':display_name' => $form['username'],
+                    ':email' => $form['email'] !== '' ? $form['email'] : null,
+                    ':password_hash' => password_hash($password, PASSWORD_DEFAULT),
+                ]);
+            } else {
+                $insert = $pdo->prepare('INSERT INTO users (username, email, password_hash, role)
+                                         VALUES (:username, :email, :password_hash, "player")');
+                $insert->execute([
+                    ':username' => $form['username'],
+                    ':email' => $form['email'] !== '' ? $form['email'] : null,
+                    ':password_hash' => password_hash($password, PASSWORD_DEFAULT),
+                ]);
+            }
 
             $userId = (int) db()->lastInsertId();
             $stmt = db()->prepare('SELECT id, username, email, role, created_at FROM users WHERE id = :id LIMIT 1');

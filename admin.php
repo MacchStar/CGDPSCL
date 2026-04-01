@@ -21,6 +21,284 @@ function record_position_event(PDO $pdo, int $demonId, ?int $oldPosition, int $n
     ]);
 }
 
+function admin_column_exists(PDO $pdo, string $table, string $column): bool
+{
+    $stmt = $pdo->prepare(
+        "SELECT COUNT(*)
+         FROM information_schema.columns
+         WHERE table_schema = DATABASE()
+           AND table_name = :table
+           AND column_name = :column"
+    );
+    $stmt->execute([
+        ':table' => $table,
+        ':column' => $column,
+    ]);
+
+    return (int) $stmt->fetchColumn() > 0;
+}
+
+function ensure_bonus_points_column(PDO $pdo): void
+{
+    if (!admin_column_exists($pdo, 'users', 'bonus_points')) {
+        $pdo->exec('ALTER TABLE users ADD COLUMN bonus_points DECIMAL(10,2) NOT NULL DEFAULT 0.00 AFTER points');
+    }
+
+    $pdo->exec('ALTER TABLE users MODIFY COLUMN bonus_points DECIMAL(10,2) NOT NULL DEFAULT 0.00');
+}
+
+function ensure_user_banned_column(PDO $pdo): void
+{
+    if (!admin_column_exists($pdo, 'users', 'is_banned')) {
+        $pdo->exec('ALTER TABLE users ADD COLUMN is_banned TINYINT(1) NOT NULL DEFAULT 0 AFTER role');
+    }
+
+    $pdo->exec('ALTER TABLE users MODIFY COLUMN is_banned TINYINT(1) NOT NULL DEFAULT 0');
+}
+
+function admin_webhook_actor_label(): string
+{
+    $name = trim((string) (current_user_display_name() ?? 'System'));
+    if ($name === '') {
+        $name = 'System';
+    }
+
+    $id = current_user_id();
+    return $id !== null ? $name . ' (#' . $id . ')' : $name;
+}
+
+function admin_webhook_text(mixed $value): string
+{
+    if ($value === null) {
+        return '-';
+    }
+
+    if (is_bool($value)) {
+        return $value ? 'Yes' : 'No';
+    }
+
+    $text = trim((string) $value);
+    return $text !== '' ? $text : '-';
+}
+
+function admin_webhook_list_label(int $legacy): string
+{
+    return $legacy === 1 ? 'Legacy' : 'Main';
+}
+
+function admin_webhook_add_change(array &$changes, string $label, string $before, string $after, bool $inline = false): void
+{
+    if ($before === $after) {
+        return;
+    }
+
+    $changes[] = [
+        'name' => $label,
+        'value' => $before . ' -> ' . $after,
+        'inline' => $inline,
+    ];
+}
+
+function admin_notify_level_added(array $level): void
+{
+    $embed = [
+        'title' => 'Level Added',
+        'color' => 5814783,
+        'fields' => [
+            ['name' => 'Level', 'value' => '#' . (int) $level['position'] . ' - ' . admin_webhook_text($level['name']), 'inline' => false],
+            ['name' => 'List', 'value' => admin_webhook_list_label((int) $level['legacy']), 'inline' => true],
+            ['name' => 'Difficulty', 'value' => admin_webhook_text($level['difficulty']), 'inline' => true],
+            ['name' => 'Requirement', 'value' => (int) $level['requirement'] . '%', 'inline' => true],
+            ['name' => 'Publisher', 'value' => admin_webhook_text($level['publisher']), 'inline' => true],
+            ['name' => 'Verifier', 'value' => admin_webhook_text($level['verifier']), 'inline' => true],
+            ['name' => 'By', 'value' => admin_webhook_actor_label(), 'inline' => true],
+        ],
+        'timestamp' => gmdate('c'),
+    ];
+
+    if ((int) ($level['id'] ?? 0) > 0) {
+        $embed['url'] = absolute_url('demon.php?id=' . (int) $level['id']);
+    }
+
+    send_discord_webhook('', [$embed]);
+}
+
+function admin_notify_level_updated(array $before, array $after, string $moveNote = ''): void
+{
+    $changes = [];
+
+    admin_webhook_add_change($changes, 'Name', admin_webhook_text($before['name'] ?? null), admin_webhook_text($after['name'] ?? null));
+    admin_webhook_add_change($changes, 'Position', '#' . (int) ($before['position'] ?? 0), '#' . (int) ($after['position'] ?? 0), true);
+    admin_webhook_add_change($changes, 'Difficulty', admin_webhook_text($before['difficulty'] ?? null), admin_webhook_text($after['difficulty'] ?? null), true);
+    admin_webhook_add_change($changes, 'Requirement', (int) ($before['requirement'] ?? 0) . '%', (int) ($after['requirement'] ?? 0) . '%', true);
+    admin_webhook_add_change($changes, 'Publisher', admin_webhook_text($before['publisher'] ?? null), admin_webhook_text($after['publisher'] ?? null), true);
+    admin_webhook_add_change($changes, 'Verifier', admin_webhook_text($before['verifier'] ?? null), admin_webhook_text($after['verifier'] ?? null), true);
+    admin_webhook_add_change($changes, 'Video URL', admin_webhook_text($before['video_url'] ?? null), admin_webhook_text($after['video_url'] ?? null));
+    admin_webhook_add_change($changes, 'Thumbnail URL', admin_webhook_text($before['thumbnail_url'] ?? null), admin_webhook_text($after['thumbnail_url'] ?? null));
+    admin_webhook_add_change($changes, 'Level ID', admin_webhook_text($before['level_id'] ?? null), admin_webhook_text($after['level_id'] ?? null), true);
+    admin_webhook_add_change($changes, 'Level Length', admin_webhook_text($before['level_length'] ?? null), admin_webhook_text($after['level_length'] ?? null), true);
+    admin_webhook_add_change($changes, 'Song', admin_webhook_text($before['song'] ?? null), admin_webhook_text($after['song'] ?? null));
+
+    $beforeObjects = ($before['object_count'] ?? null) !== null ? (string) (int) $before['object_count'] : '-';
+    $afterObjects = ($after['object_count'] ?? null) !== null ? (string) (int) $after['object_count'] : '-';
+    admin_webhook_add_change($changes, 'Object Count', $beforeObjects, $afterObjects, true);
+
+    admin_webhook_add_change(
+        $changes,
+        'List Type',
+        admin_webhook_list_label((int) ($before['legacy'] ?? 0)),
+        admin_webhook_list_label((int) ($after['legacy'] ?? 0)),
+        true
+    );
+
+    if ($changes === []) {
+        return;
+    }
+
+    $fields = [
+        ['name' => 'Level', 'value' => '#' . (int) ($after['position'] ?? 0) . ' - ' . admin_webhook_text($after['name'] ?? null), 'inline' => false],
+        ['name' => 'Demon ID', 'value' => '#' . (int) ($after['id'] ?? 0), 'inline' => true],
+        ['name' => 'By', 'value' => admin_webhook_actor_label(), 'inline' => true],
+        ['name' => 'Changed Fields', 'value' => (string) count($changes), 'inline' => true],
+    ];
+
+    if ($moveNote !== '') {
+        $fields[] = ['name' => 'Move Note', 'value' => $moveNote, 'inline' => false];
+    }
+
+    $embed = [
+        'title' => 'Level Updated',
+        'color' => 15105570,
+        'fields' => array_merge($fields, $changes),
+        'timestamp' => gmdate('c'),
+    ];
+
+    if ((int) ($after['id'] ?? 0) > 0) {
+        $embed['url'] = absolute_url('demon.php?id=' . (int) $after['id']);
+    }
+
+    send_discord_webhook('', [$embed]);
+}
+
+function admin_notify_level_moved(string $name, int $demonId, int $oldPosition, int $newPosition, string $note = ''): void
+{
+    if ($newPosition === $oldPosition) {
+        return;
+    }
+
+    $embed = [
+        'title' => 'Level Position Updated',
+        'color' => 15105570,
+        'fields' => [
+            ['name' => 'Level', 'value' => admin_webhook_text($name), 'inline' => false],
+            ['name' => 'Change', 'value' => '#' . $oldPosition . ' -> #' . $newPosition, 'inline' => true],
+            ['name' => 'By', 'value' => admin_webhook_actor_label(), 'inline' => true],
+            ['name' => 'Reason', 'value' => $note !== '' ? $note : 'Position moved in admin panel', 'inline' => false],
+        ],
+        'timestamp' => gmdate('c'),
+    ];
+
+    if ($demonId > 0) {
+        $embed['url'] = absolute_url('demon.php?id=' . $demonId);
+    }
+
+    send_discord_webhook('', [$embed]);
+}
+
+function admin_notify_user_updated(array $before, array $after, float $bonusDelta): void
+{
+    $changes = [];
+
+    admin_webhook_add_change($changes, 'Role', strtoupper((string) $before['role']), strtoupper((string) $after['role']), true);
+    admin_webhook_add_change(
+        $changes,
+        'Banned',
+        ((int) $before['is_banned'] === 1 ? 'Yes' : 'No'),
+        ((int) $after['is_banned'] === 1 ? 'Yes' : 'No'),
+        true
+    );
+    admin_webhook_add_change(
+        $changes,
+        'Bonus Points',
+        number_format((float) $before['bonus_points'], 2, '.', ''),
+        number_format((float) $after['bonus_points'], 2, '.', ''),
+        true
+    );
+    admin_webhook_add_change(
+        $changes,
+        'Total Points',
+        number_format((float) $before['points'], 2, '.', ''),
+        number_format((float) $after['points'], 2, '.', ''),
+        true
+    );
+
+    if ($changes === []) {
+        return;
+    }
+
+    $fields = [
+        ['name' => 'User', 'value' => admin_webhook_text($after['username']) . ' (#' . (int) $after['id'] . ')', 'inline' => true],
+        ['name' => 'By', 'value' => admin_webhook_actor_label(), 'inline' => true],
+        ['name' => 'Bonus Delta', 'value' => ($bonusDelta >= 0 ? '+' : '') . number_format($bonusDelta, 2, '.', ''), 'inline' => true],
+    ];
+
+    $embed = [
+        'title' => 'User Management Updated',
+        'color' => (int) $after['is_banned'] === 1 ? 15158332 : 3447003,
+        'fields' => array_merge($fields, $changes),
+        'timestamp' => gmdate('c'),
+    ];
+
+    send_discord_webhook('', [$embed]);
+}
+
+function admin_notify_submission_reviewed(array $submission, string $decision, string $reviewNote, string $playerName, array $recordFields = []): void
+{
+    $decision = strtolower($decision);
+    $decisionLabel = strtoupper($decision);
+
+    $fields = [
+        ['name' => 'Submission', 'value' => '#' . (int) ($submission['id'] ?? 0), 'inline' => true],
+        ['name' => 'Decision', 'value' => $decisionLabel, 'inline' => true],
+        ['name' => 'Type', 'value' => admin_webhook_text($submission['type'] ?? null), 'inline' => true],
+        ['name' => 'Demon', 'value' => admin_webhook_text($submission['demon_name'] ?? null), 'inline' => true],
+        ['name' => 'Player', 'value' => admin_webhook_text($playerName), 'inline' => true],
+        ['name' => 'Submitted Progress', 'value' => (int) ($submission['progress'] ?? 0) . '%', 'inline' => true],
+        ['name' => 'Reviewed By', 'value' => admin_webhook_actor_label(), 'inline' => true],
+    ];
+
+    if ($reviewNote !== '') {
+        $fields[] = ['name' => 'Review Note', 'value' => $reviewNote, 'inline' => false];
+    }
+
+    foreach ($recordFields as $field) {
+        if (!is_array($field)) {
+            continue;
+        }
+
+        $name = trim((string) ($field['name'] ?? ''));
+        $value = trim((string) ($field['value'] ?? ''));
+        if ($name === '' || $value === '') {
+            continue;
+        }
+
+        $fields[] = [
+            'name' => $name,
+            'value' => $value,
+            'inline' => !empty($field['inline']),
+        ];
+    }
+
+    $embed = [
+        'title' => 'Submission Review ' . $decisionLabel,
+        'color' => $decision === 'approved' ? 5763719 : 15548997,
+        'fields' => $fields,
+        'timestamp' => gmdate('c'),
+    ];
+
+    send_discord_webhook('', [$embed]);
+}
+
 if (method_is_post()) {
     $action = (string) ($_POST['action'] ?? '');
 
@@ -62,7 +340,6 @@ if (method_is_post()) {
         $difficulty = trim((string) ($_POST['difficulty'] ?? 'Extreme Demon'));
         $positionInput = trim((string) ($_POST['position'] ?? ''));
         $requirement = (int) ($_POST['requirement'] ?? 100);
-        $creator = trim((string) ($_POST['creator'] ?? ''));
         $publisher = trim((string) ($_POST['publisher'] ?? ''));
         $verifier = trim((string) ($_POST['verifier'] ?? ''));
         $videoUrl = trim((string) ($_POST['video_url'] ?? ''));
@@ -76,9 +353,6 @@ if (method_is_post()) {
         $errors = [];
         if ($name === '') {
             $errors[] = 'Level name is required.';
-        }
-        if ($creator === '') {
-            $errors[] = 'Creator is required.';
         }
         if ($publisher === '') {
             $errors[] = 'Publisher is required.';
@@ -151,16 +425,15 @@ if (method_is_post()) {
             }
 
             $insert = $pdo->prepare('INSERT INTO demons
-                (position, name, difficulty, requirement, creator, publisher, verifier, video_url, thumbnail_url, level_id, level_length, song, object_count, legacy)
+                (position, name, difficulty, requirement, publisher, verifier, video_url, thumbnail_url, level_id, level_length, song, object_count, legacy)
                 VALUES
-                (:position, :name, :difficulty, :requirement, :creator, :publisher, :verifier, :video_url, :thumbnail_url, :level_id, :level_length, :song, :object_count, :legacy)');
+                (:position, :name, :difficulty, :requirement, :publisher, :verifier, :video_url, :thumbnail_url, :level_id, :level_length, :song, :object_count, :legacy)');
 
             $insert->execute([
                 ':position' => $position,
                 ':name' => $name,
                 ':difficulty' => $difficulty !== '' ? $difficulty : 'Extreme Demon',
                 ':requirement' => $requirement,
-                ':creator' => $creator,
                 ':publisher' => $publisher,
                 ':verifier' => $verifier !== '' ? $verifier : null,
                 ':video_url' => $videoUrl,
@@ -175,21 +448,25 @@ if (method_is_post()) {
             $newDemonId = (int) $pdo->lastInsertId();
             record_position_event($pdo, $newDemonId, null, $position, current_user_id(), 'Level added');
 
-            $pdo->commit();
+            $createdLevelData = [
+                'id' => $newDemonId,
+                'position' => $position,
+                'name' => $name,
+                'difficulty' => $difficulty !== '' ? $difficulty : 'Extreme Demon',
+                'requirement' => $requirement,
+                'publisher' => $publisher,
+                'verifier' => $verifier,
+                'video_url' => $videoUrl,
+                'thumbnail_url' => $thumbnail,
+                'level_id' => $levelId,
+                'level_length' => $levelLength,
+                'song' => $song,
+                'object_count' => $objectCount,
+                'legacy' => $legacy,
+            ];
 
-            send_discord_webhook('', [[
-                'title' => 'Level Added',
-                'color' => 5814783,
-                'fields' => [
-                    ['name' => 'Level', 'value' => '#' . $position . ' - ' . $name, 'inline' => false],
-                    ['name' => 'Creator', 'value' => $creator, 'inline' => true],
-                    ['name' => 'Publisher', 'value' => $publisher, 'inline' => true],
-                    ['name' => 'Verifier', 'value' => $verifier !== '' ? $verifier : '-', 'inline' => true],
-                    ['name' => 'Requirement', 'value' => $requirement . '%', 'inline' => true],
-                    ['name' => 'By', 'value' => (string) (current_user_display_name() ?? 'System'), 'inline' => true],
-                ],
-                'timestamp' => gmdate('c'),
-            ]]);
+            $pdo->commit();
+            admin_notify_level_added($createdLevelData);
 
             flash('success', 'Level added at position #' . $position . '.');
         } catch (Throwable $throwable) {
@@ -211,7 +488,6 @@ if (method_is_post()) {
         $newNameInput = trim((string) ($_POST['name'] ?? ''));
         $difficultyInput = trim((string) ($_POST['difficulty'] ?? ''));
         $requirementInput = trim((string) ($_POST['requirement'] ?? ''));
-        $creatorInput = trim((string) ($_POST['creator'] ?? ''));
         $publisherInput = trim((string) ($_POST['publisher'] ?? ''));
         $verifierInput = trim((string) ($_POST['verifier'] ?? ''));
         $videoUrlInput = trim((string) ($_POST['video_url'] ?? ''));
@@ -288,14 +564,26 @@ if (method_is_post()) {
             $oldPosition = (int) $target['position'];
             $maxPosition = (int) $pdo->query('SELECT COALESCE(MAX(position), 0) FROM demons')->fetchColumn();
 
+            $beforeLevelData = [
+                'id' => $demonId,
+                'position' => (int) $target['position'],
+                'name' => (string) $target['name'],
+                'difficulty' => (string) $target['difficulty'],
+                'requirement' => (int) $target['requirement'],
+                'publisher' => (string) $target['publisher'],
+                'verifier' => (string) ($target['verifier'] ?? ''),
+                'video_url' => (string) $target['video_url'],
+                'thumbnail_url' => (string) ($target['thumbnail_url'] ?? ''),
+                'level_id' => (string) ($target['level_id'] ?? ''),
+                'level_length' => (string) ($target['level_length'] ?? ''),
+                'song' => (string) ($target['song'] ?? ''),
+                'object_count' => $target['object_count'] !== null ? (int) $target['object_count'] : null,
+                'legacy' => (int) $target['legacy'],
+            ];
+
             $finalName = $newNameInput !== '' ? $newNameInput : (string) $target['name'];
             $finalDifficulty = $difficultyInput !== '' ? $difficultyInput : (string) $target['difficulty'];
             $finalRequirement = $requirementInput !== '' ? (int) $requirementInput : (int) $target['requirement'];
-            $targetCreator = trim((string) ($target['creator'] ?? ''));
-            if ($targetCreator === '') {
-                $targetCreator = (string) $target['publisher'];
-            }
-            $finalCreator = $creatorInput !== '' ? $creatorInput : $targetCreator;
             $finalPublisher = $publisherInput !== '' ? $publisherInput : (string) $target['publisher'];
             $finalVerifier = $verifierInput !== '' ? $verifierInput : (string) ($target['verifier'] ?? '');
             $finalVideoUrl = $videoUrlInput !== '' ? $videoUrlInput : (string) $target['video_url'];
@@ -317,9 +605,6 @@ if (method_is_post()) {
 
             if ($finalName === '') {
                 throw new RuntimeException('Level name cannot be empty.');
-            }
-            if ($finalCreator === '') {
-                throw new RuntimeException('Creator cannot be empty.');
             }
             if ($finalPublisher === '') {
                 throw new RuntimeException('Publisher cannot be empty.');
@@ -417,7 +702,6 @@ if (method_is_post()) {
                     name = :name,
                     difficulty = :difficulty,
                     requirement = :requirement,
-                    creator = :creator,
                     publisher = :publisher,
                     verifier = :verifier,
                     video_url = :video_url,
@@ -434,7 +718,6 @@ if (method_is_post()) {
                 ':name' => $finalName,
                 ':difficulty' => $finalDifficulty,
                 ':requirement' => $finalRequirement,
-                ':creator' => $finalCreator,
                 ':publisher' => $finalPublisher,
                 ':verifier' => $finalVerifier !== '' ? $finalVerifier : null,
                 ':video_url' => $finalVideoUrl,
@@ -447,19 +730,25 @@ if (method_is_post()) {
                 ':id' => $demonId,
             ]);
 
-            $pdo->commit();
+            $afterLevelData = [
+                'id' => $demonId,
+                'position' => $newPosition,
+                'name' => $finalName,
+                'difficulty' => $finalDifficulty,
+                'requirement' => $finalRequirement,
+                'publisher' => $finalPublisher,
+                'verifier' => $finalVerifier,
+                'video_url' => $finalVideoUrl,
+                'thumbnail_url' => $finalThumbnail,
+                'level_id' => $finalLevelId,
+                'level_length' => $finalLevelLength,
+                'song' => $finalSong,
+                'object_count' => $finalObjectCount,
+                'legacy' => $finalLegacy,
+            ];
 
-            send_discord_webhook('', [[
-                'title' => 'Level Updated',
-                'color' => 15105570,
-                'fields' => [
-                    ['name' => 'Level', 'value' => '#' . $newPosition . ' - ' . $finalName, 'inline' => false],
-                    ['name' => 'Old Position', 'value' => '#' . $oldPosition, 'inline' => true],
-                    ['name' => 'New Position', 'value' => '#' . $newPosition, 'inline' => true],
-                    ['name' => 'By', 'value' => (string) (current_user_display_name() ?? 'System'), 'inline' => true],
-                ],
-                'timestamp' => gmdate('c'),
-            ]]);
+            $pdo->commit();
+            admin_notify_level_updated($beforeLevelData, $afterLevelData, $moveNote);
 
             flash('success', 'Updated level #' . $newPosition . ' - ' . $finalName . '.');
         } catch (Throwable $throwable) {
@@ -600,17 +889,7 @@ if (method_is_post()) {
             $pdo->commit();
 
             if ($newPosition !== $oldPosition) {
-                send_discord_webhook('', [[
-                    'title' => 'Level Position Updated',
-                    'color' => 15105570,
-                    'fields' => [
-                        ['name' => 'Level', 'value' => (string) $target['name'], 'inline' => false],
-                        ['name' => 'Change', 'value' => '#' . $oldPosition . ' -> #' . $newPosition, 'inline' => true],
-                        ['name' => 'By', 'value' => (string) (current_user_display_name() ?? 'System'), 'inline' => true],
-                        ['name' => 'Reason', 'value' => $note !== '' ? $note : 'Position moved in admin panel', 'inline' => false],
-                    ],
-                    'timestamp' => gmdate('c'),
-                ]]);
+                admin_notify_level_moved((string) $target['name'], $demonId, $oldPosition, $newPosition, $note);
             }
 
             if ($newPosition === $oldPosition) {
@@ -628,25 +907,50 @@ if (method_is_post()) {
         redirect('admin.php');
     }
 
-    if ($action === 'set_role' && is_admin()) {
+    if ($action === 'update_user' && is_admin()) {
+        $usersQueryRedirect = trim((string) ($_POST['users_q'] ?? ''));
+        $redirectTarget = $usersQueryRedirect !== ''
+            ? ('admin.php?users_q=' . rawurlencode($usersQueryRedirect) . '#admin-user-management')
+            : 'admin.php#admin-user-management';
+
         if (!validate_csrf($_POST['_token'] ?? null)) {
             flash('error', 'Invalid session token.');
-            redirect('admin.php');
+            redirect($redirectTarget);
         }
 
         $userId = (int) ($_POST['user_id'] ?? 0);
         $role = (string) ($_POST['role'] ?? '');
+        $isBannedInput = (string) ($_POST['is_banned'] ?? '0');
+        $bonusInput = trim((string) ($_POST['bonus_delta'] ?? '0'));
+
         if ($userId < 1 || !in_array($role, ['player', 'admin'], true)) {
-            flash('error', 'Invalid role update request.');
-            redirect('admin.php');
+            flash('error', 'Invalid user update request.');
+            redirect($redirectTarget);
+        }
+        if (!in_array($isBannedInput, ['0', '1'], true)) {
+            flash('error', 'Invalid banned status value.');
+            redirect($redirectTarget);
+        }
+        if (!is_numeric($bonusInput)) {
+            flash('error', 'Bonus value must be a valid number.');
+            redirect($redirectTarget);
+        }
+
+        $isBanned = $isBannedInput === '1' ? 1 : 0;
+        $bonusDelta = round((float) $bonusInput, 2);
+        if ($bonusDelta < -999999 || $bonusDelta > 999999) {
+            flash('error', 'Bonus value is out of range.');
+            redirect($redirectTarget);
         }
 
         $pdo = db();
 
         try {
             $pdo->beginTransaction();
+            ensure_bonus_points_column($pdo);
+            ensure_user_banned_column($pdo);
 
-            $userStmt = $pdo->prepare('SELECT id, username, role FROM users WHERE id = :id LIMIT 1 FOR UPDATE');
+            $userStmt = $pdo->prepare('SELECT id, username, role, is_banned, bonus_points, points FROM users WHERE id = :id LIMIT 1 FOR UPDATE');
             $userStmt->execute([':id' => $userId]);
             $target = $userStmt->fetch();
             if ($target === false) {
@@ -654,27 +958,63 @@ if (method_is_post()) {
             }
 
             $currentRole = (string) $target['role'];
-            if ($currentRole !== $role) {
-                if ($currentRole === 'admin' && $role === 'player') {
-                    $adminCount = (int) $pdo->query('SELECT COUNT(*) FROM users WHERE role = "admin"')->fetchColumn();
-                    if ($adminCount <= 1) {
-                        throw new RuntimeException('Cannot demote the last admin account.');
-                    }
-                }
-
-                $updateRole = $pdo->prepare('UPDATE users SET role = :role WHERE id = :id');
-                $updateRole->execute([
-                    ':role' => $role,
-                    ':id' => $userId,
-                ]);
-
-                if ((int) ($_SESSION['user_id'] ?? 0) === $userId && $role !== 'admin') {
-                    unset($_SESSION['admin_logged_in']);
+            $currentBanned = (int) ($target['is_banned'] ?? 0) === 1 ? 1 : 0;
+            if ($currentRole === 'admin' && $role === 'player') {
+                $adminCount = (int) $pdo->query('SELECT COUNT(*) FROM users WHERE role = "admin"')->fetchColumn();
+                if ($adminCount <= 1) {
+                    throw new RuntimeException('Cannot demote the last admin account.');
                 }
             }
 
+            $currentBonus = round((float) ($target['bonus_points'] ?? 0.0), 2);
+            $newBonus = round($currentBonus + $bonusDelta, 2);
+            if ($newBonus < -999999 || $newBonus > 999999) {
+                throw new RuntimeException('Bonus points value is out of range after applying changes.');
+            }
+
+            $currentPoints = round((float) ($target['points'] ?? 0.0), 2);
+            $newPoints = round($currentPoints + $bonusDelta, 2);
+
+            $beforeUserData = [
+                'id' => (int) $target['id'],
+                'username' => (string) $target['username'],
+                'role' => $currentRole,
+                'is_banned' => $currentBanned,
+                'bonus_points' => $currentBonus,
+                'points' => $currentPoints,
+            ];
+
+            $updateUser = $pdo->prepare('UPDATE users
+                                         SET role = :role,
+                                             is_banned = :is_banned,
+                                             bonus_points = :bonus_points,
+                                             points = ROUND(COALESCE(points, 0.00) + :bonus_delta, 2)
+                                         WHERE id = :id');
+            $updateUser->execute([
+                ':role' => $role,
+                ':is_banned' => $isBanned,
+                ':bonus_points' => $newBonus,
+                ':bonus_delta' => $bonusDelta,
+                ':id' => $userId,
+            ]);
+
+            if ((int) ($_SESSION['user_id'] ?? 0) === $userId && $role !== 'admin') {
+                unset($_SESSION['admin_logged_in']);
+            }
+
+            $afterUserData = [
+                'id' => (int) $target['id'],
+                'username' => (string) $target['username'],
+                'role' => $role,
+                'is_banned' => $isBanned,
+                'bonus_points' => $newBonus,
+                'points' => $newPoints,
+            ];
+
             $pdo->commit();
-            flash('success', 'Role updated for ' . (string) $target['username'] . ' to ' . strtoupper($role) . '.');
+            admin_notify_user_updated($beforeUserData, $afterUserData, $bonusDelta);
+
+            flash('success', 'Updated user settings for ' . (string) $target['username'] . '. Bonus delta: ' . ($bonusDelta >= 0 ? '+' : '') . number_format($bonusDelta, 2) . '.');
         } catch (Throwable $throwable) {
             if ($pdo->inTransaction()) {
                 $pdo->rollBack();
@@ -682,9 +1022,8 @@ if (method_is_post()) {
             flash('error', $throwable->getMessage());
         }
 
-        redirect('admin.php');
+        redirect($redirectTarget);
     }
-
     if ($action === 'review' && is_admin()) {
         if (!validate_csrf($_POST['_token'] ?? null)) {
             flash('error', 'Invalid session token.');
@@ -717,6 +1056,18 @@ if (method_is_post()) {
                 throw new RuntimeException('Submission already reviewed.');
             }
 
+            $submissionPlayer = trim((string) ($submission['player'] ?? ''));
+            if ($submissionPlayer === '' && (int) ($submission['submitted_by_user_id'] ?? 0) > 0) {
+                $playerLookup = $pdo->prepare('SELECT username FROM users WHERE id = :id LIMIT 1');
+                $playerLookup->execute([':id' => (int) $submission['submitted_by_user_id']]);
+                $submissionPlayer = (string) ($playerLookup->fetchColumn() ?: '');
+            }
+            if ($submissionPlayer === '') {
+                $submissionPlayer = 'Unknown';
+            }
+
+            $recordWebhookFields = [];
+
             if ($decision === 'approved') {
                 if ((string) $submission['type'] !== 'completion') {
                     throw new RuntimeException('Demon submissions are disabled. Add levels manually from the admin form.');
@@ -730,28 +1081,23 @@ if (method_is_post()) {
                     throw new RuntimeException('Cannot approve completion: demon not found.');
                 }
 
-                $player = trim((string) ($submission['player'] ?? ''));
-                if ($player === '' && (int) ($submission['submitted_by_user_id'] ?? 0) > 0) {
-                    $playerLookup = $pdo->prepare('SELECT username FROM users WHERE id = :id LIMIT 1');
-                    $playerLookup->execute([':id' => (int) $submission['submitted_by_user_id']]);
-                    $player = (string) ($playerLookup->fetchColumn() ?: '');
-                }
-
-                if ($player === '') {
-                    $player = 'Unknown';
-                }
-
                 $progress = max(1, min(100, (int) ($submission['progress'] ?? 100)));
+                $submittedVideo = (string) ($submission['video_url'] ?: '#');
+                $submittedNotes = trim((string) ($submission['notes'] ?? ''));
 
-                $existingStmt = $pdo->prepare('SELECT id, progress FROM completions WHERE demon_id = :demon_id AND player = :player LIMIT 1');
+                $existingStmt = $pdo->prepare('SELECT id, progress, video_url, notes, placement FROM completions WHERE demon_id = :demon_id AND player = :player LIMIT 1');
                 $existingStmt->execute([
                     ':demon_id' => (int) $demonId,
-                    ':player' => $player,
+                    ':player' => $submissionPlayer,
                 ]);
                 $existing = $existingStmt->fetch();
 
                 if ($existing !== false) {
-                    $newProgress = max((int) $existing['progress'], $progress);
+                    $oldProgress = (int) ($existing['progress'] ?? 0);
+                    $newProgress = max($oldProgress, $progress);
+                    $oldVideo = (string) ($existing['video_url'] ?? '#');
+                    $oldNotes = trim((string) ($existing['notes'] ?? ''));
+
                     $updateRecord = $pdo->prepare('UPDATE completions
                         SET video_url = :video_url,
                             progress = :progress,
@@ -759,11 +1105,60 @@ if (method_is_post()) {
                         WHERE id = :id');
 
                     $updateRecord->execute([
-                        ':video_url' => $submission['video_url'] ?: '#',
+                        ':video_url' => $submittedVideo,
                         ':progress' => $newProgress,
-                        ':notes' => $submission['notes'] ?: null,
+                        ':notes' => $submittedNotes !== '' ? $submittedNotes : null,
                         ':id' => (int) $existing['id'],
                     ]);
+
+                    $recordWebhookFields[] = [
+                        'name' => 'Record Action',
+                        'value' => 'Updated completion #' . (int) $existing['id'],
+                        'inline' => false,
+                    ];
+                    $recordWebhookFields[] = [
+                        'name' => 'Placement',
+                        'value' => '#' . (int) ($existing['placement'] ?? 0),
+                        'inline' => true,
+                    ];
+
+                    $hasCompletionFieldChange = false;
+                    if ($newProgress !== $oldProgress) {
+                        $recordWebhookFields[] = [
+                            'name' => 'Completion Progress',
+                            'value' => $oldProgress . '% -> ' . $newProgress . '%',
+                            'inline' => true,
+                        ];
+                        $hasCompletionFieldChange = true;
+                    }
+
+                    if ($oldVideo !== $submittedVideo) {
+                        $recordWebhookFields[] = [
+                            'name' => 'Video URL',
+                            'value' => $oldVideo . ' -> ' . $submittedVideo,
+                            'inline' => false,
+                        ];
+                        $hasCompletionFieldChange = true;
+                    }
+
+                    $oldNotesLabel = $oldNotes !== '' ? $oldNotes : '-';
+                    $newNotesLabel = $submittedNotes !== '' ? $submittedNotes : '-';
+                    if ($oldNotesLabel !== $newNotesLabel) {
+                        $recordWebhookFields[] = [
+                            'name' => 'Notes',
+                            'value' => $oldNotesLabel . ' -> ' . $newNotesLabel,
+                            'inline' => false,
+                        ];
+                        $hasCompletionFieldChange = true;
+                    }
+
+                    if (!$hasCompletionFieldChange) {
+                        $recordWebhookFields[] = [
+                            'name' => 'Record Delta',
+                            'value' => 'No completion field changed (duplicate or equivalent proof).',
+                            'inline' => false,
+                        ];
+                    }
                 } else {
                     $placementStmt = $pdo->prepare('SELECT COALESCE(MAX(placement), 0) + 1 AS next_placement
                                                     FROM completions
@@ -778,12 +1173,29 @@ if (method_is_post()) {
 
                     $insertCompletion->execute([
                         ':demon_id' => (int) $demonId,
-                        ':player' => $player,
-                        ':video_url' => $submission['video_url'] ?: '#',
+                        ':player' => $submissionPlayer,
+                        ':video_url' => $submittedVideo,
                         ':progress' => $progress,
                         ':placement' => $nextPlacement,
-                        ':notes' => $submission['notes'] ?: null,
+                        ':notes' => $submittedNotes !== '' ? $submittedNotes : null,
                     ]);
+
+                    $newCompletionId = (int) $pdo->lastInsertId();
+                    $recordWebhookFields[] = [
+                        'name' => 'Record Action',
+                        'value' => 'Created completion #' . $newCompletionId,
+                        'inline' => false,
+                    ];
+                    $recordWebhookFields[] = [
+                        'name' => 'Placement',
+                        'value' => '#' . $nextPlacement,
+                        'inline' => true,
+                    ];
+                    $recordWebhookFields[] = [
+                        'name' => 'Completion Progress',
+                        'value' => $progress . '%',
+                        'inline' => true,
+                    ];
                 }
             }
 
@@ -799,20 +1211,8 @@ if (method_is_post()) {
             ]);
 
             $pdo->commit();
-            $decisionLabel = strtoupper($decision);
-            $decisionColor = $decision === 'approved' ? 5763719 : 15548997;
-            send_discord_webhook('', [[
-                'title' => 'Submission #' . $submissionId . ' ' . $decisionLabel,
-                'color' => $decisionColor,
-                'fields' => [
-                    ['name' => 'Demon', 'value' => (string) ($submission['demon_name'] ?? '-'), 'inline' => true],
-                    ['name' => 'Player', 'value' => (string) ($submission['player'] ?? '-'), 'inline' => true],
-                    ['name' => 'Progress', 'value' => (int) ($submission['progress'] ?? 0) . '%', 'inline' => true],
-                    ['name' => 'Reviewed By', 'value' => (string) (current_user_display_name() ?? 'System'), 'inline' => true],
-                    ['name' => 'Review Note', 'value' => $reviewNote !== '' ? $reviewNote : '-', 'inline' => false],
-                ],
-                'timestamp' => gmdate('c'),
-            ]]);
+            admin_notify_submission_reviewed($submission, $decision, $reviewNote, $submissionPlayer, $recordWebhookFields);
+
             flash('success', 'Submission #' . $submissionId . ' marked as ' . $decision . '.');
         } catch (Throwable $throwable) {
             if ($pdo->inTransaction()) {
@@ -864,18 +1264,48 @@ $reviewed = db()->query('SELECT s.*, u.username AS submitter_username
                          ORDER BY s.reviewed_at DESC
                          LIMIT 30')->fetchAll();
 
-$stats = [
-    'pending' => (int) db()->query('SELECT COUNT(*) FROM submissions WHERE status = "pending"')->fetchColumn(),
-    'approved' => (int) db()->query('SELECT COUNT(*) FROM submissions WHERE status = "approved"')->fetchColumn(),
-    'rejected' => (int) db()->query('SELECT COUNT(*) FROM submissions WHERE status = "rejected"')->fetchColumn(),
-    'players' => (int) db()->query('SELECT COUNT(*) FROM users WHERE role = "player"')->fetchColumn(),
-    'admins' => (int) db()->query('SELECT COUNT(*) FROM users WHERE role = "admin"')->fetchColumn(),
-];
+$adminPdo = db();
+$hasBonusPoints = admin_column_exists($adminPdo, 'users', 'bonus_points');
+$hasUserBanned = admin_column_exists($adminPdo, 'users', 'is_banned');
 
-$users = db()->query('SELECT id, username, email, country_code, role, created_at
-                      FROM users
-                      ORDER BY created_at DESC
-                      LIMIT 100')->fetchAll();
+$stats = [
+    'pending' => (int) $adminPdo->query('SELECT COUNT(*) FROM submissions WHERE status = "pending"')->fetchColumn(),
+    'approved' => (int) $adminPdo->query('SELECT COUNT(*) FROM submissions WHERE status = "approved"')->fetchColumn(),
+    'rejected' => (int) $adminPdo->query('SELECT COUNT(*) FROM submissions WHERE status = "rejected"')->fetchColumn(),
+    'players' => (int) $adminPdo->query('SELECT COUNT(*) FROM users WHERE role = "player"')->fetchColumn(),
+    'admins' => (int) $adminPdo->query('SELECT COUNT(*) FROM users WHERE role = "admin"')->fetchColumn(),
+];
+$stats['banned'] = $hasUserBanned
+    ? (int) $adminPdo->query('SELECT COUNT(*) FROM users WHERE COALESCE(is_banned, 0) = 1')->fetchColumn()
+    : 0;
+
+$usersSelectFields = [
+    'id',
+    'username',
+    'email',
+    'country_code',
+    'role',
+    'points',
+    $hasBonusPoints ? 'bonus_points' : '0.00 AS bonus_points',
+    $hasUserBanned ? 'is_banned' : '0 AS is_banned',
+    'created_at',
+];
+$usersQuery = trim((string) ($_GET['users_q'] ?? ''));
+$usersQuery = function_exists('mb_substr')
+    ? (string) mb_substr($usersQuery, 0, 80)
+    : (string) substr($usersQuery, 0, 80);
+
+$users = [];
+if ($usersQuery !== '') {
+    $usersSql = 'SELECT ' . implode(', ', $usersSelectFields) . '
+                 FROM users
+                 WHERE username LIKE :users_query
+                 ORDER BY created_at DESC
+                 LIMIT 20';
+    $usersStmt = $adminPdo->prepare($usersSql);
+    $usersStmt->execute([':users_query' => '%' . $usersQuery . '%']);
+    $users = $usersStmt->fetchAll();
+}
 
 $maxPosition = (int) db()->query('SELECT COALESCE(MAX(position), 1) FROM demons')->fetchColumn();
 $editableDemons = db()->query('SELECT id, name, position, requirement
@@ -885,31 +1315,56 @@ $editableDemons = db()->query('SELECT id, name, position, requirement
 render_header('Admin', 'admin');
 ?>
 <section class="panel fade">
-    <div class="panel-head split">
+    <div class="panel-head">
         <div>
             <h1>Admin Dashboard</h1>
             <p>Moderation center for records and level management.</p>
         </div>
-        <form method="post" action="<?= e(base_url('admin.php')) ?>">
-            <input type="hidden" name="_token" value="<?= e(csrf_token()) ?>">
-            <input type="hidden" name="action" value="logout">
-            <button class="button white hover small" type="submit">Logout</button>
-        </form>
     </div>
 
-    <div class="detail-grid" style="grid-template-columns: repeat(5, 1fr); gap: 10px;">
+    <div class="detail-grid" style="grid-template-columns: repeat(6, 1fr); gap: 10px;">
         <div class="panel subtle"><h3><?= $stats['pending'] ?></h3><p>Pending</p></div>
         <div class="panel subtle"><h3><?= $stats['approved'] ?></h3><p>Approved</p></div>
         <div class="panel subtle"><h3><?= $stats['rejected'] ?></h3><p>Rejected</p></div>
         <div class="panel subtle"><h3><?= $stats['players'] ?></h3><p>Players</p></div>
         <div class="panel subtle"><h3><?= $stats['admins'] ?></h3><p>Admins</p></div>
+        <div class="panel subtle"><h3><?= $stats['banned'] ?></h3><p>Banned</p></div>
     </div>
 </section>
 
 
 <section class="panel fade">
     <div class="panel-head">
-        <h2>Add Level (Admin Only)</h2>
+        <h2>Quick Actions</h2>
+        <p>Choose one tool and only that section will be displayed below.</p>
+    </div>
+    <div class="admin-quick-actions">
+        <a class="admin-action-tile" href="#admin-add-level" data-open-admin-section="admin-add-level">
+            <span class="admin-action-title">Add Level</span>
+            <small>Create a new demon entry.</small>
+        </a>
+        <a class="admin-action-tile" href="#admin-edit-level" data-open-admin-section="admin-edit-level">
+            <span class="admin-action-title">Edit Level</span>
+            <small>Update level info and ranking.</small>
+        </a>
+        <a class="admin-action-tile" href="#admin-user-management" data-open-admin-section="admin-user-management">
+            <span class="admin-action-title">User Management</span>
+            <small>Adjust role, ban status, and bonus points.</small>
+        </a>
+        <a class="admin-action-tile" href="#admin-pending-submissions" data-open-admin-section="admin-pending-submissions">
+            <span class="admin-action-title">Pending Submissions</span>
+            <small>Review new records in queue.</small>
+        </a>
+        <a class="admin-action-tile" href="#admin-reviewed-submissions" data-open-admin-section="admin-reviewed-submissions">
+            <span class="admin-action-title">Recently Reviewed</span>
+            <small>Check moderation history.</small>
+        </a>
+    </div>
+</section>
+
+<section class="panel fade admin-tool-section" id="admin-add-level">
+    <div class="panel-head">
+        <h2>Add Level</h2>
         <p>Only admins can add demons to the list. Extra level metadata is optional.</p>
     </div>
 
@@ -932,11 +1387,7 @@ render_header('Admin', 'admin');
             </label>
         </div>
 
-        <div class="detail-grid" style="grid-template-columns: 1fr 1fr 1fr;">
-            <label class="field">
-                <span>Creator(s)</span>
-                <input type="text" name="creator" required>
-            </label>
+        <div class="detail-grid" style="grid-template-columns: 1fr 1fr;">
             <label class="field">
                 <span>Publisher</span>
                 <input type="text" name="publisher" required>
@@ -994,7 +1445,7 @@ render_header('Admin', 'admin');
     </form>
 </section>
 
-<section class="panel fade">
+<section class="panel fade admin-tool-section" id="admin-edit-level">
     <div class="panel-head">
         <h2>Edit Level</h2>
         <p>Update level information and ranking in one place.</p>
@@ -1020,14 +1471,10 @@ render_header('Admin', 'admin');
             </label>
         </div>
 
-        <div class="detail-grid" style="grid-template-columns: 1fr 1fr 1fr 1fr;">
+        <div class="detail-grid" style="grid-template-columns: 1fr 1fr 1fr;">
             <label class="field">
                 <span>Requirement % (optional)</span>
                 <input type="number" min="1" max="100" name="requirement" placeholder="Keep current">
-            </label>
-            <label class="field">
-                <span>Creator(s) (optional)</span>
-                <input type="text" name="creator" placeholder="Keep current">
             </label>
             <label class="field">
                 <span>Publisher (optional)</span>
@@ -1101,28 +1548,46 @@ render_header('Admin', 'admin');
     </datalist>
 </section>
 
-<section class="panel fade">
+<section class="panel fade admin-tool-section admin-list-section" id="admin-user-management">
     <div class="panel-head">
-        <h2>User Role Management</h2>
-        <p>Only admin users can access level creation, position management, and moderation tools.</p>
+        <h2>User Management</h2>
+        <p>Adjust role, banned status, and bonus points for each account in one place.</p>
     </div>
 
+    <form class="admin-user-toolbar" method="get" action="<?= e(base_url('admin.php#admin-user-management')) ?>">
+        <div class="admin-user-search-grid">
+            <label class="field">
+                <span>Search Username</span>
+                <input id="admin-user-search" type="text" name="users_q" value="<?= e($usersQuery) ?>" placeholder="Type username...">
+            </label>
+            <div class="admin-user-search-actions">
+                <button class="button white hover" type="submit">Search</button>
+                <?php if ($usersQuery !== ''): ?>
+                    <a class="button ghost hover" href="<?= e(base_url('admin.php#admin-user-management')) ?>">Clear</a>
+                <?php endif; ?>
+            </div>
+        </div>
+    </form>
     <div class="table-wrap">
-        <table class="data-table">
+        <table class="data-table admin-user-table">
             <thead>
                 <tr>
                     <th>ID</th>
                     <th>User</th>
                     <th>Email</th>
-                    <th>Country</th>
                     <th>Role</th>
+                    <th>Banned</th>
+                    <th>Points</th>
+                    <th>Bonus</th>
                     <th>Joined</th>
-                    <th>Action</th>
+                    <th>Adjust</th>
                 </tr>
             </thead>
-            <tbody>
-                <?php if ($users === []): ?>
-                    <tr><td colspan="7" class="muted">No users found.</td></tr>
+            <tbody id="admin-user-table-body">
+                <?php if ($usersQuery === ''): ?>
+                    <tr><td colspan="9" class="muted">Enter a username and press Search to load users.</td></tr>
+                <?php elseif ($users === []): ?>
+                    <tr><td colspan="9" class="muted">No users found for "<?= e($usersQuery) ?>".</td></tr>
                 <?php endif; ?>
 
                 <?php foreach ($users as $member): ?>
@@ -1130,43 +1595,61 @@ render_header('Admin', 'admin');
                     $memberIsAdmin = (string) $member['role'] === 'admin';
                     $isLastAdmin = $memberIsAdmin && $stats['admins'] <= 1;
                     $isCurrentUser = current_user_id() !== null && (int) $member['id'] === (int) current_user_id();
+                    $isBanned = (int) ($member['is_banned'] ?? 0) === 1;
                     $countryCode = normalize_country_code((string) ($member['country_code'] ?? ''));
                     $countryText = country_flag_html($countryCode);
                     ?>
-                    <tr>
+                    <tr data-user-row data-search-value="<?= e(strtolower((string) $member['username'] . ' ' . (string) ($member['email'] ?? '') . ' ' . (string) $member['role'] . ' ' . ($isBanned ? 'banned' : 'active'))) ?>">
                         <td>#<?= (int) $member['id'] ?></td>
                         <td>
-                            <b><?= e((string) $member['username']) ?></b>
+                            <div class="admin-user-identity">
+                                <?php if ($countryText !== ''): ?>
+                                    <span class="admin-user-country"><?= $countryText ?></span>
+                                <?php endif; ?>
+                                <b title="<?= e((string) $member['username']) ?>"><?= e((string) $member['username']) ?></b>
+                            </div>
                         </td>
                         <td><?= e((string) ($member['email'] ?: '-')) ?></td>
-                        <td><?= $countryText !== '' ? $countryText : '-' ?></td>
-                        <td><span class="badge"><?= e(strtoupper((string) $member['role'])) ?></span></td>
+                        <td><span class="badge <?= $memberIsAdmin ? 'approved' : '' ?>"><?= e(strtoupper((string) $member['role'])) ?></span></td>
+                        <td><span class="badge <?= $isBanned ? 'error' : 'success' ?>"><?= $isBanned ? 'BANNED' : 'ACTIVE' ?></span></td>
+                        <td><?= e(number_format((float) ($member['points'] ?? 0.0), 2)) ?></td>
+                        <td><?= e(number_format((float) ($member['bonus_points'] ?? 0.0), 2)) ?></td>
                         <td><?= e(date('Y-m-d', strtotime((string) $member['created_at']))) ?></td>
-                        <td>
-                            <form method="post" action="<?= e(base_url('admin.php')) ?>" style="display: inline-flex; gap: 6px; align-items: center;">
+                        <td class="admin-user-action-cell">
+                            <form class="admin-user-edit-form" method="post" action="<?= e(base_url('admin.php')) ?>">
                                 <input type="hidden" name="_token" value="<?= e(csrf_token()) ?>">
-                                <input type="hidden" name="action" value="set_role">
+                                <input type="hidden" name="action" value="update_user">
                                 <input type="hidden" name="user_id" value="<?= (int) $member['id'] ?>">
-                                <?php if ($memberIsAdmin): ?>
-                                    <input type="hidden" name="role" value="player">
-                                    <button
-                                        class="button red hover small"
-                                        type="submit"
-                                        <?= $isLastAdmin ? 'disabled' : '' ?>
-                                        data-confirm="Demote this admin to player?"
-                                    >
-                                        Demote
-                                    </button>
-                                <?php else: ?>
-                                    <input type="hidden" name="role" value="admin">
-                                    <button class="button blue hover small" type="submit" data-confirm="Promote this player to admin?">Promote</button>
-                                <?php endif; ?>
+                                <input type="hidden" name="users_q" value="<?= e($usersQuery) ?>">
+
+                                <div class="admin-user-edit-controls">
+                                    <label class="admin-user-edit-field">
+                                        <span>Role</span>
+                                        <select name="role">
+                                            <option value="admin" <?= $memberIsAdmin ? 'selected' : '' ?>>ADMIN</option>
+                                            <option value="player" <?= !$memberIsAdmin ? 'selected' : '' ?> <?= $isLastAdmin ? 'disabled' : '' ?>>PLAYER</option>
+                                        </select>
+                                    </label>
+                                    <label class="admin-user-edit-field">
+                                        <span>Banned</span>
+                                        <select name="is_banned">
+                                            <option value="0" <?= !$isBanned ? 'selected' : '' ?>>NO</option>
+                                            <option value="1" <?= $isBanned ? 'selected' : '' ?>>YES</option>
+                                        </select>
+                                    </label>
+                                    <label class="admin-user-edit-field">
+                                        <span>Bonus +/-</span>
+                                        <input type="number" name="bonus_delta" step="0.01" value="0" placeholder="+10 or -5">
+                                    </label>
+                                </div>
+
+                                <button class="button blue hover small" type="submit">Save</button>
                             </form>
                             <?php if ($isCurrentUser): ?>
-                                <span class="muted">(you)</span>
+                                <span class="muted admin-user-note">(you)</span>
                             <?php endif; ?>
                             <?php if ($isLastAdmin): ?>
-                                <span class="muted">Last admin cannot be demoted.</span>
+                                <span class="muted admin-user-note">Last admin cannot be demoted.</span>
                             <?php endif; ?>
                         </td>
                     </tr>
@@ -1176,7 +1659,7 @@ render_header('Admin', 'admin');
     </div>
 </section>
 
-<section class="panel fade">
+<section class="panel fade admin-tool-section admin-list-section" id="admin-pending-submissions">
     <div class="panel-head">
         <h2>Pending Submissions</h2>
     </div>
@@ -1222,7 +1705,7 @@ render_header('Admin', 'admin');
     <?php endforeach; ?>
 </section>
 
-<section class="panel fade">
+<section class="panel fade admin-tool-section admin-list-section" id="admin-reviewed-submissions">
     <div class="panel-head">
         <h2>Recently Reviewed</h2>
     </div>
@@ -1256,4 +1739,90 @@ render_header('Admin', 'admin');
         </table>
     </div>
 </section>
+<script>
+(() => {
+    const links = Array.from(document.querySelectorAll('[data-open-admin-section]'));
+    const sections = Array.from(document.querySelectorAll('.admin-tool-section'));
+    const params = new URLSearchParams(window.location.search);
+    const preferredSectionId = params.get('users_q') ? 'admin-user-management' : '';
+
+    const setActiveLink = (sectionId) => {
+        links.forEach((link) => {
+            if (!(link instanceof HTMLElement)) {
+                return;
+            }
+            const linkSection = link.getAttribute('data-open-admin-section') || '';
+            link.classList.toggle('is-active', sectionId !== '' && linkSection === sectionId);
+        });
+    };
+
+    const showSection = (sectionId, updateHash = true) => {
+        sections.forEach((section) => {
+            if (!(section instanceof HTMLElement)) {
+                return;
+            }
+            section.classList.remove('admin-tool-section-visible');
+            section.style.display = 'none';
+        });
+
+        let target = null;
+        if (sectionId !== '') {
+            const candidate = document.getElementById(sectionId);
+            if (candidate instanceof HTMLElement && candidate.classList.contains('admin-tool-section')) {
+                target = candidate;
+            }
+        }
+        if (!(target instanceof HTMLElement) && preferredSectionId !== '') {
+            const preferred = document.getElementById(preferredSectionId);
+            if (preferred instanceof HTMLElement && preferred.classList.contains('admin-tool-section')) {
+                target = preferred;
+            }
+        }
+
+        if (target instanceof HTMLElement) {
+            target.classList.add('admin-tool-section-visible');
+            target.style.display = '';
+            setActiveLink(target.id || '');
+            if (updateHash) {
+                window.history.replaceState(null, '', `#${target.id}`);
+            }
+            return;
+        }
+
+        setActiveLink('');
+        if (updateHash) {
+            window.history.replaceState(null, '', window.location.pathname + window.location.search);
+        }
+    };
+
+    links.forEach((link) => {
+        if (!(link instanceof HTMLElement)) {
+            return;
+        }
+        link.addEventListener('click', (event) => {
+            event.preventDefault();
+            const sectionId = link.getAttribute('data-open-admin-section') || '';
+            showSection(sectionId, true);
+            const target = document.getElementById(sectionId);
+            if (target instanceof HTMLElement) {
+                target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+        });
+    });
+
+    window.addEventListener('hashchange', () => {
+        showSection(window.location.hash.replace(/^#/, ''), false);
+    });
+
+    showSection(window.location.hash.replace(/^#/, ''), false);
+})();
+</script>
 <?php render_footer(); ?>
+
+
+
+
+
+
+
+

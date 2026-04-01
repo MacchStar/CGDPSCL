@@ -136,11 +136,25 @@ function render_list_dropdown(string $id, string $title, string $description, ar
     <?php
 }
 
-$allDemons = db()->query('SELECT d.*, COUNT(c.id) AS completion_count
-                           FROM demons d
-                           LEFT JOIN completions c ON c.demon_id = d.id
-                           GROUP BY d.id
-                           ORDER BY d.position ASC')->fetchAll();
+$hasUserBannedColumn = users_has_is_banned_column();
+
+if ($hasUserBannedColumn) {
+    $allDemons = db()->query('SELECT d.*,
+                                     COUNT(CASE WHEN banned_users.id IS NULL THEN c.id END) AS completion_count
+                              FROM demons d
+                              LEFT JOIN completions c ON c.demon_id = d.id
+                              LEFT JOIN users banned_users
+                                ON LOWER(banned_users.username) = LOWER(c.player)
+                               AND COALESCE(banned_users.is_banned, 0) = 1
+                              GROUP BY d.id
+                              ORDER BY d.position ASC')->fetchAll();
+} else {
+    $allDemons = db()->query('SELECT d.*, COUNT(c.id) AS completion_count
+                              FROM demons d
+                              LEFT JOIN completions c ON c.demon_id = d.id
+                              GROUP BY d.id
+                              ORDER BY d.position ASC')->fetchAll();
+}
 
 $main = [];
 $extended = [];
@@ -166,11 +180,16 @@ foreach ($allDemons as $demon) {
     $legacy[] = $demon;
 }
 
-$listEditors = db()->query('SELECT username, country_code
-                            FROM users
-                            WHERE role = "admin"
-                            ORDER BY created_at ASC, username ASC
-                            LIMIT 20')->fetchAll();
+$listEditorsSql = 'SELECT username, country_code
+                   FROM users
+                   WHERE role = "admin"';
+if ($hasUserBannedColumn) {
+    $listEditorsSql .= ' AND COALESCE(is_banned, 0) = 0';
+}
+$listEditorsSql .= '
+                   ORDER BY created_at ASC, username ASC
+                   LIMIT 20';
+$listEditors = db()->query($listEditorsSql)->fetchAll();
 
 $discordWidgetUrl = discord_server_widget_url();
 
@@ -295,4 +314,3 @@ render_header('Main List', 'list', [
 </div>
 
 <?php render_footer(); ?>
-

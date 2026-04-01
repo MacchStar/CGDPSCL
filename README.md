@@ -1,4 +1,4 @@
-# Pointercrate-PHP
+﻿# Pointercrate-PHP
 
 Pointercrate-inspired demonlist built with PHP + MySQL.
 
@@ -30,9 +30,17 @@ Pointercrate-inspired demonlist built with PHP + MySQL.
 - `timezone`: app timezone
 - `debug`: debug mode
 
-## Update database
+### If Upgrading From Older DB
 
-Accessing `https://your-gdps.com/demonlist/update.php` will fully update database and it will be automatically deleted once the update is complete.
+Run:
+
+- `php update_db_schema.php`
+
+Or open in browser:
+
+- `update_db_schema.php?run=1`
+
+This will update missing columns and remove deprecated `users.display_name`.
 
 ### Discord
 
@@ -41,7 +49,3 @@ Accessing `https://your-gdps.com/demonlist/update.php` will fully update databas
   - example: `https://discord.com/widget?id=...&theme=dark`
 - `server_id`: used if `server_widget_url` is empty
 - `server_theme`: `dark` or `light`
-
-## Roles and Permissions
-
-Only accounts with `role = admin` can add/edit levels and review submissions.

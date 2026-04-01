@@ -4,11 +4,11 @@ declare(strict_types=1);
 require __DIR__ . '/bootstrap.php';
 
 if (is_logged_in()) {
-    redirect('account.php');
+    redirect('index.php');
 }
 
 $next = trim((string) ($_GET['next'] ?? $_POST['next'] ?? ''));
-$nextPath = (str_starts_with($next, '/') && !str_starts_with($next, '//')) ? $next : base_url('submit.php');
+$nextPath = (str_starts_with($next, '/') && !str_starts_with($next, '//')) ? $next : base_url('index.php');
 $username = '';
 $errors = [];
 

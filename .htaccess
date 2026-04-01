@@ -1,6 +1,7 @@
 RewriteEngine On
 RewriteBase /demonlist/
 
+# Redirect explicit script URLs to pretty URLs.
 RewriteCond %{THE_REQUEST} \s/+demonlist/index\.php(?:[?\s]|$) [NC]
 RewriteRule ^index\.php$ /demonlist/ [R=301,L]
 
@@ -10,10 +11,12 @@ RewriteRule ^demon\.php$ /demonlist/id=%1 [R=301,L]
 RewriteCond %{THE_REQUEST} \s/+demonlist/(players|guidelines|submit|admin|account|profile|login|logout|register)\.php(?:[?\s]|$) [NC]
 RewriteRule ^(players|guidelines|submit|admin|account|profile|login|logout|register)\.php$ /demonlist/$1 [R=301,L]
 
+# Keep existing files and folders untouched.
 RewriteCond %{REQUEST_FILENAME} -f [OR]
 RewriteCond %{REQUEST_FILENAME} -d
 RewriteRule ^ - [L]
 
+# Pretty URL routes.
 RewriteRule ^$ index.php [L]
 RewriteRule ^id=([0-9]+)$ demon.php?id=$1 [QSA,L,NC]
 RewriteRule ^(players|guidelines|submit|admin|account|profile|login|logout|register)$ $1.php [QSA,L,NC]

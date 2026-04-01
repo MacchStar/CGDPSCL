@@ -1,19 +1,22 @@
-﻿CREATE TABLE IF NOT EXISTS users (
+CREATE TABLE IF NOT EXISTS users (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     username VARCHAR(40) NOT NULL,
-    display_name VARCHAR(80) NOT NULL,
     email VARCHAR(120) NULL,
     country_code CHAR(2) NULL,
     password_hash VARCHAR(255) NOT NULL,
     role ENUM('player', 'admin') NOT NULL DEFAULT 'player',
+    is_banned TINYINT(1) NOT NULL DEFAULT 0,
     points DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+    bonus_points DECIMAL(10,2) NOT NULL DEFAULT 0.00,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uq_users_username (username),
     UNIQUE KEY uq_users_email (email),
     KEY idx_users_role (role),
     KEY idx_users_country (country_code),
-    KEY idx_users_points (points)
+    KEY idx_users_is_banned (is_banned),
+    KEY idx_users_points (points),
+    KEY idx_users_bonus_points (bonus_points)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS demons (

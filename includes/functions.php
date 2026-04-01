@@ -181,6 +181,100 @@ function discord_server_widget_url(): ?string
     return 'https://discord.com/widget?id=' . rawurlencode($serverId) . '&theme=' . rawurlencode($theme);
 }
 
+function users_has_is_banned_column(?PDO $pdo = null): bool
+{
+    static $checked = false;
+    static $result = false;
+
+    if ($checked) {
+        return $result;
+    }
+
+    $checked = true;
+
+    try {
+        $pdo = $pdo instanceof PDO ? $pdo : db();
+        $stmt = $pdo->query(
+            "SELECT COUNT(*)
+             FROM information_schema.columns
+             WHERE table_schema = DATABASE()
+               AND table_name = 'users'
+               AND column_name = 'is_banned'"
+        );
+        $result = (int) $stmt->fetchColumn() > 0;
+    } catch (Throwable) {
+        $result = false;
+    }
+
+    return $result;
+}
+
+function discord_normalize_embed(array $embed): array
+{
+    $normalized = [];
+
+    if (isset($embed['title'])) {
+        $normalized['title'] = mb_substr(trim((string) $embed['title']), 0, 256);
+    }
+    if (isset($embed['description'])) {
+        $normalized['description'] = mb_substr(trim((string) $embed['description']), 0, 4096);
+    }
+    if (isset($embed['url']) && filter_var((string) $embed['url'], FILTER_VALIDATE_URL) !== false) {
+        $normalized['url'] = (string) $embed['url'];
+    }
+    if (isset($embed['color'])) {
+        $normalized['color'] = max(0, min(0xFFFFFF, (int) $embed['color']));
+    }
+    if (isset($embed['timestamp'])) {
+        $normalized['timestamp'] = (string) $embed['timestamp'];
+    }
+
+    if (isset($embed['fields']) && is_array($embed['fields'])) {
+        $fields = [];
+        foreach ($embed['fields'] as $field) {
+            if (!is_array($field)) {
+                continue;
+            }
+
+            $name = mb_substr(trim((string) ($field['name'] ?? '')), 0, 256);
+            $value = mb_substr(trim((string) ($field['value'] ?? '')), 0, 1024);
+            if ($name === '' || $value === '') {
+                continue;
+            }
+
+            $fields[] = [
+                'name' => $name,
+                'value' => $value,
+                'inline' => !empty($field['inline']),
+            ];
+
+            if (count($fields) >= 25) {
+                break;
+            }
+        }
+
+        if ($fields !== []) {
+            $normalized['fields'] = $fields;
+        }
+    }
+
+    if (isset($embed['footer']) && is_array($embed['footer'])) {
+        $footerText = mb_substr(trim((string) ($embed['footer']['text'] ?? '')), 0, 2048);
+        if ($footerText !== '') {
+            $normalized['footer'] = ['text' => $footerText];
+        }
+    }
+
+    if (isset($embed['author']) && is_array($embed['author'])) {
+        $authorName = mb_substr(trim((string) ($embed['author']['name'] ?? '')), 0, 256);
+        if ($authorName !== '') {
+            $normalized['author'] = ['name' => $authorName];
+        }
+    }
+
+    return $normalized;
+}
+
 function send_discord_webhook(string $content, array $embeds = []): bool
 {
     $url = discord_webhook_url();
@@ -188,13 +282,52 @@ function send_discord_webhook(string $content, array $embeds = []): bool
         return false;
     }
 
+    $webhookUsername = trim((string) config('discord.webhook_username', app_name() . ' Notifier'));
+    if ($webhookUsername === '') {
+        $webhookUsername = app_name() . ' Notifier';
+    }
+    $webhookAvatarUrl = trim((string) config('discord.webhook_avatar_url', ''));
+    if ($webhookAvatarUrl !== '' && filter_var($webhookAvatarUrl, FILTER_VALIDATE_URL) === false) {
+        $webhookAvatarUrl = '';
+    }
+
     $payload = [
-        'username' => app_name() . ' Notifier',
-        'content' => substr(trim($content), 0, 1900),
+        'username' => mb_substr($webhookUsername, 0, 80),
+        'content' => mb_substr(trim($content), 0, 1900),
+        'allowed_mentions' => ['parse' => []],
     ];
+    if ($webhookAvatarUrl !== '') {
+        $payload['avatar_url'] = $webhookAvatarUrl;
+    }
 
     if ($embeds !== []) {
-        $payload['embeds'] = $embeds;
+        $normalizedEmbeds = [];
+        foreach ($embeds as $embed) {
+            if (!is_array($embed)) {
+                continue;
+            }
+
+            $normalized = discord_normalize_embed($embed);
+            if ($normalized === []) {
+                continue;
+            }
+
+            if (!isset($normalized['footer'])) {
+                $normalized['footer'] = ['text' => app_name() . ' Admin Event'];
+            }
+            if (!isset($normalized['timestamp'])) {
+                $normalized['timestamp'] = gmdate('c');
+            }
+
+            $normalizedEmbeds[] = $normalized;
+            if (count($normalizedEmbeds) >= 10) {
+                break;
+            }
+        }
+
+        if ($normalizedEmbeds !== []) {
+            $payload['embeds'] = $normalizedEmbeds;
+        }
     }
 
     $json = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
@@ -216,7 +349,8 @@ function send_discord_webhook(string $content, array $embeds = []): bool
                 'Content-Type: application/json',
                 'User-Agent: demonlist-php',
             ],
-            CURLOPT_TIMEOUT => 5,
+            CURLOPT_CONNECTTIMEOUT => 3,
+            CURLOPT_TIMEOUT => 8,
         ]);
 
         curl_exec($ch);
@@ -231,7 +365,7 @@ function send_discord_webhook(string $content, array $embeds = []): bool
             'method' => 'POST',
             'header' => "Content-Type: application/json\r\nUser-Agent: demonlist-php\r\n",
             'content' => $json,
-            'timeout' => 5,
+            'timeout' => 8,
             'ignore_errors' => true,
         ],
     ]);
