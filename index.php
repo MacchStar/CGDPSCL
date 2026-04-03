@@ -191,11 +191,11 @@ $listEditorsSql .= '
                    LIMIT 20';
 $listEditors = db()->query($listEditorsSql)->fetchAll();
 
-$discordWidgetUrl = discord_server_widget_url();
+$discordWidgetUrl = discord_server_widget_url(https://discord.gg/rE7wE7TCD5);
 
 render_header('Main List', 'list', [
-    'title' => 'Main List',
-    'description' => 'Top 150 ranked demons with Main, Extended, and Legacy sections.',
+    'title' => 'CGDPS Challenge List',
+    'description' => 'The highest ranked challenges in the Clash GDPS.',
     'url' => base_url('index.php'),
 ]);
 ?>
@@ -209,8 +209,8 @@ render_header('Main List', 'list', [
 <div class="flex m-center container">
     <main class="left">
         <section class="panel fade">
-            <h1>Geometry Dash Demonlist</h1>
-            <p style="margin-top: 0;">The main list of the Demonlist with 150 hardest rated levels in the game.</p>
+            <h1>Clash GDPS Challenge List</h1>
+            <p style="margin-top: 0;">The challenge list consisting of the hardest verified challenges in Clash GDPS.</p>
             <div class="search seperated" style="margin: 10px 0;">
                 <input placeholder="Filter shown demons..." type="text" data-live-search>
             </div>
@@ -291,7 +291,7 @@ render_header('Main List', 'list', [
         <section id="stats-viewer" class="panel fade">
             <h2 class="underlined pad">Stats Viewer</h2>
             <p>
-                Get a detailed overview of who completed the most, created the most demons, or beat the hardest demons.
+                Get a detailed overview of who completed the most, created the most challenges, or beat the hardest challenges.
                 Compare your progress and climb the leaderboard.
             </p>
             <a class="blue hover button" href="<?= e(base_url('players.php')) ?>">Open stats viewer!</a>
